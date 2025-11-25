@@ -35,16 +35,17 @@ class CNNFeatureExtractor(nn.Module):
     """
     Convolutional Neural Network for extracting features from Atari game frames.
 
-    Input: Single grayscale frame (210x160) → shape (batch, 1, 210, 160)
+    Input: 4 stacked grayscale frames (210x160) → shape (batch, 4, 210, 160)
     Output: Feature vector of size 512 → shape (batch, 512)
 
-    Uses raw 210x160 grayscale images without resizing, as specified by professor.
+    Uses raw 210x160 grayscale images without resizing.
+    Frame stacking provides temporal information (ball velocity, paddle movement).
     """
 
-    def __init__(self, input_channels: int = 1, feature_dim: int = 512):
+    def __init__(self, input_channels: int = 4, feature_dim: int = 512):
         super(CNNFeatureExtractor, self).__init__()
 
-        # First convolutional layer: 1 channel (grayscale) → 16 filters
+        # First convolutional layer: 4 channels (stacked frames) → 16 filters
         # kernel_size=5, stride=2 → reduces spatial dimensions
         self.conv1 = nn.Conv2d(
             in_channels=input_channels,
@@ -78,7 +79,7 @@ class CNNFeatureExtractor(nn.Module):
         Forward pass through the CNN feature extractor.
 
         Args:
-            x: (batch_size, 1, 210, 160)
+            x: (batch_size, 4, 210, 160) - 4 stacked frames
 
         Returns:
             (batch_size, 512)
@@ -86,7 +87,7 @@ class CNNFeatureExtractor(nn.Module):
         # Safety check to catch shape bugs early
         # Learn more: "NCHW format in PyTorch"
         assert x.dim() == 4, f"Expected 4D input (N, C, H, W), got {x.shape}"
-        assert x.size(1) == 1, f"Expected 1 channel (grayscale), got {x.size(1)}"
+        assert x.size(1) == 4, f"Expected 4 channels (stacked frames), got {x.size(1)}"
 
         x = F.relu(self.conv1(x))  # (N,16,*,*)
         x = F.relu(self.conv2(x))  # (N,32,*,*)
@@ -108,7 +109,7 @@ class PPOActorCritic(nn.Module):
     Shared CNN → policy head (actor) + value head (critic).
     """
 
-    def __init__(self, num_actions: int = 3, feature_dim: int = 512):
+    def __init__(self, num_actions: int=6, feature_dim: int = 512):
         """
         Args:
             num_actions: Number of discrete actions
@@ -116,9 +117,9 @@ class PPOActorCritic(nn.Module):
         """
         super(PPOActorCritic, self).__init__()
 
-        # Shared CNN feature extractor for grayscale frames
+        # Shared CNN feature extractor for stacked grayscale frames
         self.feature_extractor = CNNFeatureExtractor(
-            input_channels=1, feature_dim=feature_dim
+            input_channels=4, feature_dim=feature_dim
         )
 
         # Policy head: 512 → num_actions (logits)
@@ -132,7 +133,7 @@ class PPOActorCritic(nn.Module):
         Forward pass.
 
         Args:
-            x: (batch_size, 1, 210, 160)
+            x: (batch_size, 4, 210, 160) - 4 stacked frames
 
         Returns:
             action_logits: (batch_size, num_actions)
@@ -150,7 +151,7 @@ class PPOActorCritic(nn.Module):
         Sample an action from the policy or evaluate a given action.
 
         Args:
-            x: (batch_size, 1, 210, 160)
+            x: (batch_size, 4, 210, 160) - 4 stacked frames
             action: optional tensor of actions
 
         Returns:
@@ -195,7 +196,7 @@ class RolloutBuffer:
 
     def clear(self):
         """Reset the buffer for a new rollout."""
-        self.states = []  # list of np arrays, each (210,160)
+        self.states = []  # list of observations (with FrameStack: each is (4, 210, 160))
         self.actions = []  # list of ints
         self.log_probs = []  # list of tensors (scalar)
         self.rewards = []  # list of floats
@@ -204,7 +205,7 @@ class RolloutBuffer:
 
     def add(
         self,
-        state: np.ndarray,
+        state,  # Can be LazyFrames or np.ndarray
         action: int,
         log_prob: torch.Tensor,
         reward: float,
@@ -214,7 +215,10 @@ class RolloutBuffer:
         """
         Add one step of experience to the buffer.
         """
-        self.states.append(state)  # raw observation
+        # Convert LazyFrames to numpy array if needed
+        if hasattr(state, '__array__'):
+            state = np.array(state)
+        self.states.append(state)  # raw observation (4, 210, 160) with FrameStack
         self.actions.append(action)  # int
         self.log_probs.append(log_prob.detach())  # detach from graph
         self.rewards.append(float(reward))  # float
@@ -339,16 +343,29 @@ class PPOTrainer:
 
     # ---------- Helper to convert raw state to tensor ----------
 
-    def _state_to_tensor(self, state: np.ndarray) -> torch.Tensor:
+    def _state_to_tensor(self, state) -> torch.Tensor:
         """
-        Convert raw env state (210x160 or 210x160x1) → (1,1,210,160) on device.
+        Convert raw env state to tensor on device.
+        
+        With FrameStack wrapper, state is a LazyFrames object containing 4 stacked frames.
+        Shape: (4, 210, 160) after conversion
+        Output: (1, 4, 210, 160) - batch dimension added
         """
+        # FrameStack returns LazyFrames, convert to numpy array
+        if hasattr(state, '__array__'):
+            state = np.array(state)
+        
         state_tensor = torch.from_numpy(state).float()
-        if state_tensor.dim() == 3:  # (210,160,1)
-            state_tensor = state_tensor.squeeze(-1)
-        # Now (210,160) → add batch and channel dims → (1,1,210,160)
-        state_tensor = state_tensor.unsqueeze(0).unsqueeze(0).to(self.device)
-        return state_tensor
+        
+        # Handle different input shapes
+        if state_tensor.dim() == 3:  # (4, 210, 160) from FrameStack
+            # Add batch dimension: (4, 210, 160) → (1, 4, 210, 160)
+            state_tensor = state_tensor.unsqueeze(0)
+        elif state_tensor.dim() == 2:  # (210, 160) single frame (fallback)
+            # Add batch and channel dims: (210, 160) → (1, 1, 210, 160)
+            state_tensor = state_tensor.unsqueeze(0).unsqueeze(0)
+        
+        return state_tensor.to(self.device)
 
     # ---------- Rollout collection ----------
 
@@ -409,10 +426,11 @@ class PPOTrainer:
                 self.episode_count += 1
 
                 # Reset episode stats
-                if self.seed is not None:
-                    self.state, _ = self.env.reset(seed=self.seed)
-                else:
-                    self.state, _ = self.env.reset()
+                # if self.seed is not None:
+                #     self.state, _ = self.env.reset(seed=self.seed)
+                # else:
+                #     self.state, _ = self.env.reset()
+                self.state, _ = self.env.reset()
                 episode_reward = 0.0
                 episode_length = 0
 
@@ -434,16 +452,19 @@ class PPOTrainer:
         """
         Update policy and value networks using PPO clipped objective.
         """
-        # Convert stored states → (T,1,210,160)
+        # Convert stored states → (T, 4, 210, 160) with FrameStack
         states_list = []
         for state in self.rollout_buffer.states:
+            # Convert LazyFrames to numpy if needed
+            if hasattr(state, '__array__'):
+                state = np.array(state)
             st = torch.from_numpy(state).float()
-            if st.dim() == 3:
-                st = st.squeeze(-1)  # (210,160,1) → (210,160)
-            st = st.unsqueeze(0).unsqueeze(0)  # (1,1,210,160)
+            # state is already (4, 210, 160) from FrameStack, just add batch dim
+            if st.dim() == 3:  # (4, 210, 160)
+                st = st.unsqueeze(0)  # (1, 4, 210, 160)
             states_list.append(st)
 
-        # (T,1,210,160)
+        # (T, 4, 210, 160)
         states = torch.cat(states_list, dim=0).to(self.device)
 
         # Actions and old log probs
@@ -572,7 +593,9 @@ class PPOTrainer:
             f"GAE-Lambda={self.gae_lambda}"
         )
 
-        # Initial reset
+        # Initial reset - seed only used here for reproducibility
+        # Subsequent episode resets (in collect_rollout) do NOT use seed
+        # This ensures diverse training experiences while maintaining reproducibility
         if self.seed is not None:
             self.state, _ = self.env.reset(seed=self.seed)
         else:

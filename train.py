@@ -61,9 +61,9 @@ def create_base_config() -> dict:
         },
         "hyperparameters": {
             "learning_rate": 3e-5,  # VARIED: [1e-4, 5e-5, 3e-5]
-            "gamma": 0.99,  # FIXED
-            "gae_lambda": 0.9,  # FIXED
-            "clip_ratio": 0.2,  # FIXED
+            "gamma": 0.99,  # FIXEeD
+            "gae_lambda": 0.90,  # FIXED
+            "clip_ratio": 0.1,  # FIXED
             "entropy_coeff": 0.01,  # VARIED: [0.0, 0.01, 0.02]
             "value_coeff": 0.5,
             "max_grad_norm": 0.5,
@@ -114,7 +114,7 @@ def create_experiment_configs() -> list:
 class ExperimentRunner:
     """Runs all experiments at once."""
 
-    def __init__(self, output_dir: str = "results"):
+    def __init__(self, output_dir: str = "results_clip01_gae090"):
         self.output_dir = output_dir
         self.logs_dir = os.path.join(output_dir, "logs")
         self.configs_dir = os.path.join(output_dir, "configs")
@@ -306,8 +306,8 @@ class ExperimentRunner:
 
             f.write("HYPERPARAMETER CONFIGURATION:\n\n")
             f.write("FIXED:\n")
-            f.write("  Clip Ratio: 0.2\n")
-            f.write("  GAE Lambda: 0.95\n")
+            f.write("  Clip Ratio: 0.1\n")
+            f.write("  GAE Lambda: 0.9\n")
             f.write("  Gamma: 0.99\n")
             f.write("  Epochs per Update: 5\n")
             f.write("  Total Episodes: 5000\n\n")
